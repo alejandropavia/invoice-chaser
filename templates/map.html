@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Selecciona las columnas — Invoice Chaser</title>
+  <style>
+    :root{
+      --bg:#0b1020;--card:#0f172a;--muted:#9aa4b2;
+      --text:#e6eaf2;--line:rgba(255,255,255,.12);
+      --accent:#6ee7b7
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:ui-sans-serif,system-ui;
+      background:var(--bg);
+      color:var(--text)
+    }
+    .wrap{max-width:980px;margin:0 auto;padding:40px 20px}
+    .card{
+      background:rgba(15,23,42,.85);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:18px
+    }
+    h1{margin:0 0 6px;font-size:22px}
+    p{margin:0 0 14px;color:var(--muted);line-height:1.5}
+    label{display:block;margin:10px 0 6px;color:var(--muted);font-size:13px}
+    select,input{
+      width:100%;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid var(--line);
+      background:rgba(2,6,23,.25);
+      color:var(--text)
+    }
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    @media (max-width:900px){.grid{grid-template-columns:1fr}}
+    .btn{
+      margin-top:18px;
+      appearance:none;
+      border:0;
+      cursor:pointer;
+      padding:12px 16px;
+      border-radius:14px;
+      font-weight:650;
+      background:linear-gradient(
+        180deg,
+        rgba(110,231,183,.95),
+        rgba(110,231,183,.75)
+      );
+      color:#071018
+    }
+    .mini{font-size:12px;color:var(--muted)}
+    .row{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-bottom:14px
+    }
+    .pill{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--line);
+      padding:6px 10px;
+      border-radius:999px
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <div class="row" style="justify-content:space-between;">
+      <div class="pill">Paso 2 · Configuración inicial</div>
+      <div class="mini">Tu Excel no se modifica</div>
+    </div>
+
+    <div class="card">
+      <h1>Selecciona las columnas</h1>
+      <p>
+        Indica qué columna de tu Excel corresponde a cada dato.
+        Solo <b>Email</b> e <b>Importe</b> son obligatorios.
+        <br/>
+        <span style="color:var(--muted);font-size:11px;">Tu archivo no se modifica, solo leemos los datos.</span>
+      </p>
+
+      <form action="/preview" method="post">
+        <input type="hidden" name="token" value="{{ token }}"/>
+
+        <div class="grid">
+          <div>
+            <label>Email del cliente (obligatorio)</label>
+            <select name="email_col" required>
+              {% for c in columns %}
+                <option value="{{c}}" {% if state and state.email_col == c %}selected{% endif %}>
+                  {{c}}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div>
+            <label>Importe pendiente (obligatorio)</label>
+            <select name="amount_col" required>
+              {% for c in columns %}
+                <option value="{{c}}" {% if state and state.amount_col == c %}selected{% endif %}>
+                  {{c}}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div>
+            <label>Nombre del cliente (opcional)</label>
+            <select name="name_col">
+              <option value="" {% if state and not state.name_col %}selected{% endif %}>
+                (no tengo)
+              </option>
+              {% for c in columns %}
+                <option value="{{c}}" {% if state and state.name_col == c %}selected{% endif %}>
+                  {{c}}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div>
+            <label>Fecha de vencimiento (opcional)</label>
+            <select name="due_date_col">
+              <option value="" {% if state and not state.due_date_col %}selected{% endif %}>
+                (no tengo)
+              </option>
+              {% for c in columns %}
+                <option value="{{c}}" {% if state and state.due_date_col == c %}selected{% endif %}>
+                  {{c}}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div>
+            <label>Estado del cobro (opcional)</label>
+            <select name="status_col">
+              <option value="" {% if state and not state.status_col %}selected{% endif %}>
+                (no tengo)
+              </option>
+              {% for c in columns %}
+                <option value="{{c}}" {% if state and state.status_col == c %}selected{% endif %}>
+                  {{c}}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div>
+            <label>Valor que indica “pagado”</label>
+            <input
+              name="paid_value"
+              value="{{ state.paid_value if state and state.paid_value else 'Pagado' }}"
+            />
+            <div class="mini">Ej: Pagado, Paid, OK…</div>
+          </div>
+        </div>
+
+        <button class="btn" type="submit">Ver impagos</button>
+
+        <div class="mini" style="margin-top:12px;">
+          En el siguiente paso verás la lista de impagos detectados.
+        </div>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

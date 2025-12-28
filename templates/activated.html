@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Automatización activada — Invoice Chaser</title>
+  <style>
+    :root{
+      --bg:#0b1020; --card:#0f172a; --muted:#9aa4b2; --text:#e6eaf2;
+      --line:rgba(255,255,255,.12); --accent:#6ee7b7;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap{max-width:900px;margin:0 auto;padding:40px 20px}
+    .card{
+      background:rgba(15,23,42,.85);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:32px;
+      text-align:center;
+    }
+    h1{margin:0 0 10px;font-size:24px}
+    p{margin:0 0 14px;color:var(--muted);line-height:1.6}
+    .success-icon{
+      font-size:48px;
+      margin-bottom:16px;
+    }
+    .stats{
+      margin:24px 0;
+      padding:20px;
+      background:rgba(110,231,183,.1);
+      border:1px solid rgba(110,231,183,.2);
+      border-radius:14px;
+    }
+    .stats b{
+      font-size:32px;
+      color:var(--accent);
+      display:block;
+      margin-top:8px;
+    }
+    .btn{
+      margin-top:24px;
+      appearance:none;
+      border:0;
+      cursor:pointer;
+      padding:12px 24px;
+      border-radius:14px;
+      font-weight:650;
+      background:linear-gradient(180deg, rgba(110,231,183,.95), rgba(110,231,183,.75));
+      color:#071018;
+      text-decoration:none;
+      display:inline-block;
+    }
+    .mini{font-size:12px;color:var(--muted);margin-top:12px}
+    a{color:var(--accent);text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="success-icon">✅</div>
+      <h1>Automatización activada</h1>
+      
+      <div class="stats">
+        <div style="color:var(--muted);font-size:14px;">Recordatorios programados</div>
+        <b>{{ created }}</b>
+      </div>
+
+      {% if created == 0 %}
+        <p style="color:var(--muted);">
+          No se programaron recordatorios. Esto puede deberse a que no hay impagos en el panel o que los recordatorios ya estaban programados.
+        </p>
+      {% else %}
+        <p>
+          Los emails se enviarán automáticamente según la secuencia configurada.
+        </p>
+        <p class="mini">
+          Emails programados y en curso. Puedes ver el estado en cualquier momento.
+        </p>
+      {% endif %}
+
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:24px;">
+        <a href="/panel{% if token %}?token={{ token }}{% endif %}" class="btn">Volver al panel</a>
+        <a href="/activity{% if token %}?token={{ token }}{% endif %}" class="btn" style="background:transparent;border:1px solid var(--line);color:var(--text);">Ver actividad</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Configurar emails — Invoice Chaser</title>
+  <style>
+    :root{
+      --bg:#0b1020; --card:#0f172a; --muted:#9aa4b2; --text:#e6eaf2;
+      --line:rgba(255,255,255,.12); --accent:#6ee7b7;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap{max-width:900px;margin:0 auto;padding:40px 20px}
+    .card{
+      background:rgba(15,23,42,.85);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:22px;
+    }
+    h1{margin:0 0 6px;font-size:22px}
+    p{margin:0 0 14px;color:var(--muted);line-height:1.55}
+    label{
+      display:block;
+      margin:14px 0 6px;
+      color:var(--muted);
+      font-size:13px;
+    }
+    input{
+      width:100%;
+      padding:11px 12px;
+      border-radius:12px;
+      border:1px solid var(--line);
+      background:rgba(2,6,23,.25);
+      color:var(--text);
+      font-size:14px;
+    }
+    input[readonly]{
+      opacity:.85;
+      cursor:not-allowed;
+    }
+    .grid{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:12px;
+      margin-top:6px;
+    }
+    @media (max-width:900px){
+      .grid{grid-template-columns:1fr}
+    }
+    .mini{font-size:12px;color:var(--muted);margin-top:6px}
+    .btn{
+      margin-top:18px;
+      appearance:none;
+      border:0;
+      cursor:pointer;
+      padding:12px 16px;
+      border-radius:14px;
+      font-weight:650;
+      background:linear-gradient(180deg, rgba(110,231,183,.95), rgba(110,231,183,.75));
+      color:#071018;
+    }
+    a{color:var(--accent);text-decoration:none}
+    .pill{
+      display:inline-block;
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--line);
+      padding:6px 10px;
+      border-radius:999px;
+      margin-bottom:10px;
+    }
+    .note{
+      margin-top:12px;
+      border:1px solid var(--line);
+      background:rgba(2,6,23,.25);
+      padding:12px 14px;
+      border-radius:14px;
+      color:var(--muted);
+      font-size:12px;
+      line-height:1.5;
+    }
+    .k{color:var(--text); font-weight:650}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="pill">Paso final · Automatización</div>
+      <h1>Configurar recordatorios por email</h1>
+      <p>
+        Estos emails son <span class="k">recordatorios administrativos</span>.
+        Se envían desde el dominio de Invoice Chaser y las respuestas van a tu email.
+      </p>
+
+      <form action="/sequence/save" method="post">
+        <input type="hidden" name="token" value="{{ token }}">
+        
+        <label>Nombre de la empresa que está reclamando el cobro</label>
+        <input
+          name="company_name"
+          value="{{ settings.company_name }}"
+          placeholder="Ej: Acme SL"
+          required
+        >
+        <div class="mini">Aparecerá en el email como remitente.</div>
+
+        <label>Nombre que firmará el email (persona o departamento)</label>
+        <input
+          name="signature_name"
+          value="{{ settings.signature_name }}"
+          placeholder="Ej: María Pérez"
+          required
+        >
+        <div class="mini">Ej: "María Pérez" o "Departamento de Administración".</div>
+
+        <!-- FROM EMAIL (FIJO, NO EDITABLE) -->
+        <label>Se envían desde <span style="color:var(--muted);font-weight:normal;">(no editable)</span></label>
+        <input
+          value="{{ settings.from_email }}"
+          readonly
+          style="opacity:0.6;background:rgba(2,6,23,.4);cursor:not-allowed;"
+        >
+        <input type="hidden" name="from_email" value="{{ settings.from_email }}">
+        <div class="mini">
+          Este campo no se puede modificar. Mejora la entregabilidad y evita spam.
+        </div>
+
+        <!-- REPLY TO -->
+        <label>Tu email (Reply-To) <span style="color:var(--muted);font-weight:normal;">(obligatorio)</span></label>
+        <input
+          name="reply_to_email"
+          type="email"
+          value="{{ settings.reply_to_email }}"
+          placeholder="Ej: administracion@tuempresa.com"
+          required
+        >
+        <div class="mini">
+          Si el cliente responde, la respuesta irá a este email.
+        </div>
+
+        <!-- SECUENCIA -->
+        <label>Secuencia de recordatorios (días después del vencimiento)</label>
+        <div class="grid">
+          <div>
+            <input type="number" name="day_1" value="{{ settings.day_1 }}" min="0" required>
+            <div class="mini"><b>Email 1</b> (obligatorio)</div>
+          </div>
+          <div>
+            <input
+              type="number"
+              name="day_2"
+              value="{{ settings.day_2 }}"
+              min="0"
+              placeholder="Ej: 14"
+            >
+            <div class="mini"><b>Email 2</b> (opcional; vacío o 0 = desactivado)</div>
+          </div>
+        </div>
+
+        <div class="note">
+          <b>Importante:</b> si un cliente ya pagó, vuelve al paso anterior y usa
+          <span class="k">“Actualizar archivo”</span> para recalcular y detener recordatorios pendientes.
+        </div>
+
+        <button class="btn" type="submit">Activar automatización</button>
+      </form>
+
+      <p class="mini" style="margin-top:16px;">
+        <a href="/panel{% if token %}?token={{ token }}{% endif %}">← Volver al panel</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>

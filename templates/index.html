@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Invoice Chaser — cobra antes, sin perseguir</title>
+  <style>
+    :root{
+      --bg:#0b1020; --card:#0f172a; --muted:#9aa4b2; --text:#e6eaf2;
+      --line:rgba(255,255,255,.12); --accent:#6ee7b7;
+      --shadow:0 18px 60px rgba(0,0,0,.45);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      background: radial-gradient(1100px 700px at 20% 0%, rgba(110,231,183,.18), transparent 60%),
+                  radial-gradient(900px 600px at 100% 30%, rgba(59,130,246,.16), transparent 55%),
+                  var(--bg);
+      color:var(--text);
+    }
+    .wrap{max-width:1000px; margin:0 auto; padding:48px 20px 80px}
+    .top{display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:40px}
+    .brand{font-weight:700; letter-spacing:.2px}
+    .pill{
+      font-size:12px; color:var(--muted); border:1px solid var(--line);
+      padding:6px 10px; border-radius:999px;
+      backdrop-filter: blur(8px);
+    }
+    .hero{display:grid; grid-template-columns: 1.1fr .9fr; gap:24px; align-items:stretch}
+    @media (max-width: 900px){ .hero{grid-template-columns:1fr} }
+    h1{margin:0 0 10px; font-size:42px; line-height:1.05}
+    p{margin:0; color:var(--muted); line-height:1.55}
+    .card{
+      background: rgba(15,23,42,.75);
+      border:1px solid var(--line);
+      border-radius:20px;
+      box-shadow:var(--shadow);
+      padding:22px;
+      backdrop-filter: blur(10px);
+    }
+    .cta{margin-top:18px; display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+    .btn{
+      appearance:none; border:0; cursor:pointer;
+      padding:12px 16px; border-radius:14px; font-weight:650;
+      background: linear-gradient(180deg, rgba(110,231,183,.95), rgba(110,231,183,.75));
+      color:#071018;
+    }
+    .btn:disabled{opacity:.6; cursor:not-allowed}
+    .ghost{
+      background: transparent; border:1px solid var(--line); color:var(--text);
+      padding:12px 16px; border-radius:14px;
+      text-decoration:none;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+    }
+    .mini{font-size:12px; color:var(--muted)}
+    .features{display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-top:14px}
+    @media (max-width: 900px){ .features{grid-template-columns:1fr} }
+    .feat{border:1px solid var(--line); border-radius:16px; padding:14px; background: rgba(2,6,23,.25)}
+    .feat b{display:block; margin-bottom:6px}
+    .uploader{display:flex; flex-direction:column; gap:12px}
+    .file{
+      display:flex; align-items:center; gap:10px; padding:12px; border-radius:14px;
+      border:1px dashed rgba(255,255,255,.22); background: rgba(2,6,23,.25);
+    }
+    input[type=file]{width:100%; color:var(--muted)}
+    .row{display:flex; gap:10px; flex-wrap:wrap}
+    .hint{font-size:12px; color:var(--muted); margin-top:6px}
+    .footer{margin-top:26px; color:var(--muted); font-size:12px}
+    .ok{color:rgba(110,231,183,.95)}
+    .link{color:rgba(110,231,183,.95); text-decoration:none}
+    .link:hover{text-decoration:underline}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="brand">Invoice Chaser</div>
+      <div class="pill">MVP · Excel/CSV → recordatorios automáticos</div>
+    </div>
+
+    <div class="hero">
+      <div class="card">
+        <h1>Cobra antes,<br/>sin perseguir.</h1>
+        <p>
+          Sube tu Excel/CSV, selecciona las columnas en 30 segundos y verás los impagos al instante.
+          En el siguiente paso, activas recordatorios por email automáticamente.
+        </p>
+
+        <div class="cta">
+          {% if has_panel_data %}
+            <a href="/panel{% if token %}?token={{ token }}{% endif %}" class="btn">Ir al panel</a>
+          {% endif %}
+          <span class="mini">Sin integraciones · Sin complicaciones</span>
+        </div>
+
+        <div class="features">
+          <div class="feat">
+            <b>✅ Compatible</b>
+            <div class="mini">Tu Excel tal cual. Solo eliges qué columna es cada cosa.</div>
+          </div>
+          <div class="feat">
+            <b>⚡ Rápido</b>
+            <div class="mini">Lista de impagos en menos de 1 minuto.</div>
+          </div>
+          <div class="feat">
+            <b>🔁 Actualizable</b>
+            <div class="mini">Sube una nueva versión del Excel y se recalcula todo.</div>
+          </div>
+        </div>
+
+        <div style="margin-top:14px" class="mini">
+          ¿No tienes impagos hoy? No pasa nada: podrás actualizar el archivo cuando quieras.
+        </div>
+      </div>
+
+      <div class="card" id="subir">
+        <div class="uploader">
+          <h2 style="margin:0 0 2px; font-size:18px;">Sube tu Excel o CSV</h2>
+          <div class="mini">Formatos soportados: .csv, .xlsx, .xls</div>
+
+          <form action="/upload" method="post" enctype="multipart/form-data" onsubmit="onSend()">
+            <div class="file">
+              <input id="file" type="file" name="file" accept=".csv,.xlsx,.xls" required />
+            </div>
+            <div class="row" style="margin-top:10px;">
+              <button id="btn" class="btn" type="submit">Subir y continuar</button>
+              <span id="status" class="hint"></span>
+            </div>
+            <div class="hint">
+              Tip: si tu Excel tiene más columnas (teléfono, notas, etc.), se ignoran.
+            </div>
+          </form>
+
+          <div class="footer">
+            <span class="ok">✔</span> MVP: el archivo se usa solo para procesar el flujo.
+            <span style="opacity:.8">En producción se define retención y borrado automático.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function onSend(){
+      const btn = document.getElementById("btn");
+      const st = document.getElementById("status");
+      btn.disabled = true;
+      btn.textContent = "Procesando…";
+      st.textContent = "Subiendo archivo…";
+    }
+
+  </script>
+</body>
+</html>

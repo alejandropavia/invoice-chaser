@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Impagos — Invoice Chaser</title>
+  <style>
+    :root{--bg:#0b1020;--card:#0f172a;--muted:#9aa4b2;--text:#e6eaf2;--line:rgba(255,255,255,.12);--accent:#6ee7b7}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:ui-sans-serif,system-ui;background:var(--bg);color:var(--text)}
+    .wrap{max-width:1100px;margin:0 auto;padding:40px 20px}
+    .card{background:rgba(15,23,42,.85);border:1px solid var(--line);border-radius:18px;padding:18px}
+    h1{margin:0 0 10px;font-size:22px}
+    .mini{font-size:12px;color:var(--muted)}
+    .stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+    .pill{border:1px solid var(--line);border-radius:999px;padding:6px 10px;color:var(--muted);font-size:12px}
+    table{width:100%;border-collapse:collapse;margin-top:12px;overflow:hidden;border-radius:14px}
+    th,td{padding:10px;border-bottom:1px solid var(--line);text-align:left;font-size:13px}
+    th{color:var(--muted);font-weight:600}
+    tr:hover td{background:rgba(2,6,23,.25)}
+    a{color:var(--accent);text-decoration:none}
+
+    .actions{
+      margin-top:14px;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .btn-primary{
+      appearance:none;border:0;cursor:pointer;
+      padding:10px 14px;border-radius:14px;font-weight:650;
+      background:linear-gradient(180deg, rgba(110,231,183,.95), rgba(110,231,183,.75));
+      color:#071018;
+      font-size:14px;
+      text-decoration:none;
+      display:inline-block;
+    }
+    .btn-primary:disabled{
+      opacity:.45;
+      cursor:not-allowed;
+    }
+    .btn-secondary{
+      appearance:none;border:1px solid var(--line);cursor:pointer;
+      padding:10px 14px;border-radius:14px;
+      background:transparent;color:var(--text);
+      font-size:14px;
+      font-weight:650;
+    }
+    .file{
+      border:1px dashed var(--line);
+      padding:10px 12px;
+      border-radius:14px;
+      color:var(--muted);
+      font-size:13px;
+    }
+    .notice{
+      margin-top:12px;
+      border:1px solid var(--line);
+      background:rgba(2,6,23,.25);
+      padding:12px 14px;
+      border-radius:14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Impagos detectados</h1>
+
+      <div class="stats">
+        <div class="pill">Total filas: <b>{{ stats.total_rows }}</b></div>
+        <div class="pill">Válidas: <b>{{ stats.valid_rows }}</b></div>
+        <div class="pill">Impagos: <b>{{ stats.unpaid_rows }}</b></div>
+        {% if stats.updated_scheduled is defined %}
+          <div class="pill">Actualizados: <b>{{ stats.updated_scheduled }}</b></div>
+        {% endif %}
+      </div>
+
+      <div class="mini"><b>Regla aplicada:</b> {{ stats.decision_reason }}</div>
+
+      <!-- ACCIONES -->
+      <div class="actions">
+        <form action="/sequence" method="post" style="display:inline;">
+          <input type="hidden" name="token" value="{{ token }}">
+          <button class="btn-primary" type="submit" {% if rows|length == 0 %}disabled{% endif %}>
+            Configurar emails
+          </button>
+        </form>
+
+        <form action="/refresh" method="post" style="display:inline;" onsubmit="return handleRefresh(event)">
+          <input type="hidden" name="token" value="{{ token }}">
+          <button type="submit" class="btn-primary" id="refresh-btn">
+            Actualizar archivo
+          </button>
+        </form>
+
+        <a href="/activity{% if token %}?token={{ token }}{% endif %}" class="btn-primary" style="text-decoration:none;display:inline-block;">
+          Ver actividad
+        </a>
+      </div>
+
+      <div class="notice">
+        <div class="mini">
+          <b>Actualizar archivo</b> sirve para recalcular impagos y <b>detener recordatorios</b> si un cliente ya pagó.
+          Si faltan columnas, te pediremos volver a seleccionar las columnas (solo en ese caso).
+        </div>
+      </div>
+
+      {% if rows|length == 0 %}
+        <div class="notice">
+          <div style="font-weight:650; margin-bottom:6px;">No se han encontrado impagos con los criterios actuales.</div>
+          <div class="mini">
+            Cuando tengas nuevos impagos, sube una versión actualizada del Excel/CSV para que se programen automáticamente.
+          </div>
+        </div>
+      {% else %}
+        <table>
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Nombre</th>
+              <th>Importe</th>
+              <th>Vencimiento</th>
+              <th>Días tarde</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+              <tr>
+                <td>{{ r.email }}</td>
+                <td>{{ r.name if r.name else '-' }}</td>
+                <td>{{ r.amount }}</td>
+                <td>{{ r.due_date if r.due_date else '-' }}</td>
+                <td>{{ r.days_late if r.days_late is not none else '-' }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+
+        <p class="mini" style="margin-top:12px;">
+          Mostrando hasta 200 filas (MVP).
+        </p>
+      {% endif %}
+
+      <p style="margin-top:16px;" class="mini">
+        <a href="/">← Subir otro archivo</a>
+      </p>
+      
+      {% if stats.refreshed is defined and stats.refreshed %}
+        <div class="notice" style="background:rgba(110,231,183,.1);border-color:rgba(110,231,183,.3);margin-top:12px;">
+          <div style="color:var(--accent);font-weight:650;">✓ Actualizado correctamente</div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <script>
+    function handleRefresh(e) {
+      const btn = document.getElementById("refresh-btn");
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Actualizando…";
+      }
+      return true;
+    }
+  </script>
+</body>
+</html>
