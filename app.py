@@ -990,3 +990,16 @@ def activity(request: Request, token: Optional[str] = None):
 @app.get("/logs", response_class=HTMLResponse)
 def logs():
     return RedirectResponse(url="/activity")
+
+
+from email_service import send_email
+
+send_email(
+    to_email="YOUR_PERSONAL_EMAIL@gmail.com",
+    subject="Invoice Chaser – Email Test",
+    html="""
+    <p>Hello,</p>
+    <p>This is a real test email sent from Invoice Chaser.</p>
+    <p>If you received this, the email system is working correctly.</p>
+    """
+)
