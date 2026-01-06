@@ -1,14 +1,14 @@
 import os
 import requests
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-
 RESEND_API_URL = "https://api.resend.com/emails"
 FROM_EMAIL = "Invoice Chaser <notifications@invoicechaserapp.com>"
 
 
 def send_email(to_email: str, subject: str, html: str):
-    if not RESEND_API_KEY:
+    """Send email via Resend API. Does not crash on import if key is missing."""
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
         raise RuntimeError("RESEND_API_KEY environment variable is not set")
 
     response = requests.post(

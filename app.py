@@ -10,8 +10,9 @@ from datetime import date, datetime, timedelta, time as dt_time
 from typing import Optional, Dict, Any, List, Tuple
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+import logging
 
 import pandas as pd
 from core import load_table, get_columns, Mapping, Rules, preview_unpaid
@@ -19,6 +20,8 @@ from email_templates import SUBJECT_1, SUBJECT_2, BODY_1, BODY_2
 
 app = FastAPI(title="Invoice Chaser")
 templates = Jinja2Templates(directory="templates")
+
+logger = logging.getLogger("uvicorn.error")
 
 DB_PATH = Path("app.db")
 UPLOADS_DIR = Path("uploads")
@@ -542,14 +545,53 @@ def process_due_reminders_loop():
 
 @app.on_event("startup")
 def on_startup():
+    port = os.getenv("PORT", "10000")
+    logger.info(f"Starting Invoice Chaser. PORT={port}")
     ensure_tables()
+    logger.info("Database tables ensured")
     t = threading.Thread(target=process_due_reminders_loop, daemon=True)
     t.start()
+    logger.info("Background worker thread started")
+    
+    # Temporary email test - only runs if TEST_EMAIL and RESEND_API_KEY are set
+    # This will be removed after confirmation
+    try:
+        from email_service import send_email
+        test_email = os.getenv("TEST_EMAIL")
+        if test_email and os.getenv("RESEND_API_KEY"):
+            try:
+                send_email(
+                    to_email=test_email,
+                    subject="Invoice Chaser – Email Test",
+                    html="""
+                    <p>Hello,</p>
+                    <p>This is a real test email sent from Invoice Chaser.</p>
+                    <p>If you received this, the email system is working correctly.</p>
+                    """
+                )
+                logger.info(f"Test email sent to {test_email}")
+            except Exception as e:
+                logger.warning(f"Test email failed (non-critical): {e}")
+    except Exception as e:
+        logger.warning(f"Email service import failed (non-critical): {e}")
 
 
 # -------------------------
 # Routes
 # -------------------------
+@app.get("/health")
+def health():
+    """Health check endpoint for Render."""
+    return {"ok": True}
+
+
+@app.get("/version")
+def version():
+    """Version endpoint for deployment verification."""
+    commit_hash = os.getenv("RENDER_GIT_COMMIT", os.getenv("GIT_COMMIT", "unknown"))
+    return {"version": commit_hash, "service": "Invoice Chaser"}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     # Check if there's existing data to show "Ir al panel" button
@@ -992,14 +1034,3 @@ def logs():
     return RedirectResponse(url="/activity")
 
 
-from email_service import send_email
-
-send_email(
-    to_email="YOUR_PERSONAL_EMAIL@gmail.com",
-    subject="Invoice Chaser – Email Test",
-    html="""
-    <p>Hello,</p>
-    <p>This is a real test email sent from Invoice Chaser.</p>
-    <p>If you received this, the email system is working correctly.</p>
-    """
-)
