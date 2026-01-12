@@ -115,18 +115,53 @@ def ensure_tables():
     """)
 
     # reminders: stage 0 = due date, 1 = chase #1, 2 = chase #2
+    # New schema with all required fields
     cur.execute("""
         CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            debt_id INTEGER NOT NULL,
-            stage INTEGER NOT NULL,                 -- 0 = due date, 1 = chase #1, 2 = chase #2
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
             send_at TEXT NOT NULL,
             sent_at TEXT,
-            status TEXT NOT NULL DEFAULT 'pending', -- pending/sent/failed/canceled
-            last_error TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error TEXT,
+            reminder_type TEXT NOT NULL,  -- due_date | chase_1 | chase_2
+            to_email TEXT NOT NULL,
+            reply_to TEXT,
+            invoice_number TEXT NOT NULL,
+            client_name TEXT,
+            amount TEXT NOT NULL,
+            currency TEXT DEFAULT 'EUR',
+            due_date TEXT,
+            days_overdue INTEGER,
+            company_name TEXT,
+            signature TEXT,
+            invoice_key TEXT NOT NULL,  -- (to_email + invoice_number + due_date) for cooldown
+            last_sent_at TEXT,  -- for cooldown enforcement
+            debt_id INTEGER,  -- keep for backward compatibility
+            stage INTEGER,  -- keep for backward compatibility (0=due_date, 1=chase_1, 2=chase_2)
             FOREIGN KEY(debt_id) REFERENCES debts(id)
         )
     """)
+    
+    # Migrate existing reminders if needed
+    try:
+        cur.execute("ALTER TABLE reminders ADD COLUMN id_new TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN created_at TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN reminder_type TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN to_email TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN reply_to TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN invoice_number TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN client_name TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN amount TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN currency TEXT DEFAULT 'EUR'")
+        cur.execute("ALTER TABLE reminders ADD COLUMN due_date TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN days_overdue INTEGER")
+        cur.execute("ALTER TABLE reminders ADD COLUMN company_name TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN signature TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN invoice_key TEXT")
+        cur.execute("ALTER TABLE reminders ADD COLUMN last_sent_at TEXT")
+    except Exception:
+        pass  # Columns may already exist
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS send_log (
@@ -423,26 +458,46 @@ def upsert_debt(email: str, name: str, amount: float, due_date_iso: Optional[str
 def cancel_pending_for_debts_not_in_current(current_debt_ids: List[int]):
     """
     Al actualizar el Excel: cancelamos recordatorios pending de deudas que ya no están como impago.
+    Works with both old and new schema.
     """
     conn = get_conn()
     cur = conn.cursor()
 
     if not current_debt_ids:
-        cur.execute("""
-            UPDATE reminders
-            SET status='canceled', last_error=NULL
-            WHERE status='pending'
-        """)
+        # Cancel all pending reminders
+        try:
+            # Try new schema first (error field)
+            cur.execute("""
+                UPDATE reminders
+                SET status='canceled', error=NULL
+                WHERE status='pending'
+            """)
+        except Exception:
+            # Fallback to old schema (last_error field)
+            cur.execute("""
+                UPDATE reminders
+                SET status='canceled', last_error=NULL
+                WHERE status='pending'
+            """)
         conn.commit()
         conn.close()
         return
 
     placeholders = ",".join(["?"] * len(current_debt_ids))
-    cur.execute(f"""
-        UPDATE reminders
-        SET status='canceled', last_error=NULL
-        WHERE status='pending' AND debt_id NOT IN ({placeholders})
-    """, current_debt_ids)
+    try:
+        # Try new schema first
+        cur.execute(f"""
+            UPDATE reminders
+            SET status='canceled', error=NULL
+            WHERE status='pending' AND debt_id NOT IN ({placeholders})
+        """, current_debt_ids)
+    except Exception:
+        # Fallback to old schema
+        cur.execute(f"""
+            UPDATE reminders
+            SET status='canceled', last_error=NULL
+            WHERE status='pending' AND debt_id NOT IN ({placeholders})
+        """, current_debt_ids)
 
     conn.commit()
     conn.close()
@@ -450,19 +505,19 @@ def cancel_pending_for_debts_not_in_current(current_debt_ids: List[int]):
 
 def clamp_to_future(dt: datetime, now: datetime) -> datetime:
     """
-    If dt is in the past, move it to now + 5 minutes.
+    If dt is in the past, move it to now + 2 minutes.
     Returns timezone-aware datetime.
     """
     if dt <= now:
-        return now + timedelta(minutes=5)
+        return now + timedelta(minutes=2)
     return dt
 
 
 def create_or_refresh_reminders_from_rows(settings: Dict[str, Any], rows: List[Dict[str, Any]], token: Optional[str] = None, include_due_date: bool = True) -> int:
     """
-    Creates reminders: stage 0 = due date, 1 = chase #1, 2 = chase #2.
-    For old invoices, schedules ONLY the next pending reminder (no flood).
-    Cancels pending reminders for debts no longer in current list.
+    Creates ALL 3 reminders per invoice (due_date, chase_1, chase_2) with new schema.
+    Cooldown is enforced in scheduler (6 hours per invoice_key).
+    All send_at times are clamped to future (now + 2 minutes minimum).
     """
     # Get chase days (migrate from old day_1/day_2 if needed)
     chase_1_days = int(settings.get("chase_1_days") or settings.get("day_1", 2))
@@ -497,6 +552,12 @@ def create_or_refresh_reminders_from_rows(settings: Dict[str, Any], rows: List[D
     else:
         now = datetime.utcnow()
 
+    # Get settings for email
+    company_name = settings.get("company_name", "Your Company")
+    signature = settings.get("signature_name", "")
+    reply_to = (settings.get("reply_to_email") or "").strip()
+    currency = "EUR"  # Default currency
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -509,97 +570,125 @@ def create_or_refresh_reminders_from_rows(settings: Dict[str, Any], rows: List[D
         if amount is None or amount == "":
             continue
 
-        name = (r.get("name") or "").strip()
+        client_name = (r.get("name") or "").strip()
         due = _parse_due_date(r.get("due_date"))
         if not due:
             continue  # Skip if no due date
         
         due_iso = due.isoformat()
-        debt_id = upsert_debt(to_email, name, float(amount), due_iso)
+        debt_id = upsert_debt(to_email, client_name, float(amount), due_iso)
         current_debt_ids.append(debt_id)
 
-        # Check existing reminders for this debt
-        cur.execute("""
-            SELECT stage, status, send_at FROM reminders
-            WHERE debt_id = ? AND status IN ('pending', 'sent')
-            ORDER BY stage ASC
-        """, (debt_id,))
-        existing = cur.fetchall()
-        existing_stages = {int(row["stage"]): row["status"] for row in existing}
+        # Generate invoice number (consistent hash)
+        invoice_seed = f"{to_email}{amount}{due_iso}"
+        invoice_hash = hashlib.md5(invoice_seed.encode()).hexdigest()[:8].upper()
+        invoice_number = f"INV-{invoice_hash}"
+        
+        # Invoice key for cooldown (unique per invoice)
+        invoice_key = f"{to_email}|{invoice_number}|{due_iso}"
+        
+        # Calculate days overdue
+        today = date.today()
+        days_overdue = (today - due).days if due < today else 0
         
         # Calculate candidate reminder dates
         due_date = due
         chase_1_date = due_date + timedelta(days=chase_1_days)
-        chase_2_date = due_date + timedelta(days=chase_2_days) if chase_2_days else None
+        chase_2_date = due_date + timedelta(days=chase_2_days) if chase_2_days and chase_2_days > 0 else None
         
-        # Determine which reminder to schedule (NO FLOOD RULE)
-        # For old invoices: schedule ONLY the next pending one in sequence
-        # For future invoices: schedule all appropriate stages (but only one at a time)
-        stage_to_schedule = None
-        target_date = None
+        # Create all 3 reminders (cooldown enforced in scheduler)
+        reminders_to_create = []
         
-        today = date.today()
-        is_old_invoice = due_date < today
+        # 1. Due date reminder (always if include_due_date)
+        if include_due_date:
+            reminders_to_create.append({
+                "reminder_type": "due_date",
+                "stage": 0,
+                "target_date": due_date,
+                "days_overdue": 0,
+            })
         
-        if is_old_invoice:
-            # OLD INVOICE: Schedule ONLY the next pending reminder in sequence
-            if include_due_date and 0 not in existing_stages:
-                # Due date reminder not sent yet - schedule it
-                stage_to_schedule = 0
-                target_date = due_date
-                logger.info(f"[REMINDER] Invoice {to_email} (due {due_date}): scheduling DUE DATE reminder (old invoice)")
-            elif include_due_date and existing_stages.get(0) == "sent" and 1 not in existing_stages:
-                # Due date sent, schedule chase #1
-                stage_to_schedule = 1
-                target_date = chase_1_date
-                logger.info(f"[REMINDER] Invoice {to_email} (due {due_date}): scheduling CHASE #1 (old invoice)")
-            elif (not include_due_date or existing_stages.get(0) == "sent") and 1 not in existing_stages:
-                # Skip due date or it's sent, schedule chase #1
-                stage_to_schedule = 1
-                target_date = chase_1_date
-                logger.info(f"[REMINDER] Invoice {to_email} (due {due_date}): scheduling CHASE #1 (old invoice)")
-            elif existing_stages.get(1) == "sent" and chase_2_days and 2 not in existing_stages:
-                # Chase #1 sent, schedule chase #2
-                stage_to_schedule = 2
-                target_date = chase_2_date
-                logger.info(f"[REMINDER] Invoice {to_email} (due {due_date}): scheduling CHASE #2 (old invoice)")
-        else:
-            # FUTURE INVOICE: Schedule all appropriate stages
-            # But only schedule one at a time - start with due date if enabled
-            if include_due_date and 0 not in existing_stages:
-                stage_to_schedule = 0
-                target_date = due_date
-                logger.info(f"[REMINDER] Invoice {to_email} (due {due_date}): scheduling DUE DATE reminder (future invoice)")
-            elif 1 not in existing_stages:
-                stage_to_schedule = 1
-                target_date = chase_1_date
-                logger.info(f"[REMINDER] Invoice {to_email} (due {due_date}): scheduling CHASE #1 (future invoice)")
-            elif chase_2_days and 2 not in existing_stages:
-                stage_to_schedule = 2
-                target_date = chase_2_date
-                logger.info(f"[REMINDER] Invoice {to_email} (due {due_date}): scheduling CHASE #2 (future invoice)")
+        # 2. Chase 1 reminder (mandatory)
+        reminders_to_create.append({
+            "reminder_type": "chase_1",
+            "stage": 1,
+            "target_date": chase_1_date,
+            "days_overdue": chase_1_days,
+        })
         
-        # Schedule the selected reminder
-        if stage_to_schedule is not None and target_date:
-            seed = f"{to_email}|{stage_to_schedule}|{token or 'default'}"
+        # 3. Chase 2 reminder (optional, only if chase_2_days > 0)
+        if chase_2_date:
+            reminders_to_create.append({
+                "reminder_type": "chase_2",
+                "stage": 2,
+                "target_date": chase_2_date,
+                "days_overdue": chase_2_days,
+            })
+        
+        # Create each reminder
+        for rem_info in reminders_to_create:
+            reminder_type = rem_info["reminder_type"]
+            stage = rem_info["stage"]
+            target_date = rem_info["target_date"]
+            days_overdue_for_reminder = rem_info["days_overdue"]
+            
+            # Check if reminder already exists (by invoice_key and reminder_type)
+            cur.execute("""
+                SELECT id FROM reminders
+                WHERE invoice_key = ? AND reminder_type = ? AND status IN ('pending', 'sent')
+                LIMIT 1
+            """, (invoice_key, reminder_type))
+            existing = cur.fetchone()
+            if existing:
+                continue  # Skip if already exists
+            
+            # Calculate send_at time
+            seed = f"{to_email}|{stage}|{token or 'default'}"
             send_at = pick_send_datetime(target_date, seed, now)
             
-            # NEVER schedule in the past - clamp to future
-            send_at = clamp_to_future(send_at, now)
+            # NEVER schedule in the past - clamp to future (now + 2 minutes minimum)
+            if send_at <= now:
+                send_at = now + timedelta(minutes=2)
             send_at_iso = send_at.isoformat()
             
-            # Check if already exists
-            cur.execute("""
-                SELECT COUNT(*) AS c FROM reminders
-                WHERE debt_id = ? AND stage = ? AND send_at = ? AND status IN ('pending','sent')
-            """, (debt_id, stage_to_schedule, send_at_iso))
-            if cur.fetchone()["c"] == 0:
+            # Create reminder ID
+            reminder_id = f"{invoice_key}|{reminder_type}|{send_at_iso}"
+            
+            # Insert reminder with all fields
+            try:
                 cur.execute("""
-                    INSERT INTO reminders (debt_id, stage, send_at, status)
-                    VALUES (?, ?, ?, 'pending')
-                """, (debt_id, stage_to_schedule, send_at_iso))
+                    INSERT INTO reminders (
+                        id, created_at, send_at, status, reminder_type,
+                        to_email, reply_to, invoice_number, client_name,
+                        amount, currency, due_date, days_overdue,
+                        company_name, signature, invoice_key,
+                        debt_id, stage
+                    ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    reminder_id,
+                    now.isoformat(),
+                    send_at_iso,
+                    reminder_type,
+                    to_email,
+                    reply_to if reply_to else None,
+                    invoice_number,
+                    client_name if client_name else None,
+                    str(amount),
+                    currency,
+                    due_iso,
+                    days_overdue_for_reminder,
+                    company_name,
+                    signature if signature else None,
+                    invoice_key,
+                    debt_id,
+                    stage,
+                ))
                 created += 1
-                logger.info(f"[REMINDER] Created reminder stage {stage_to_schedule} for {to_email}, send_at={send_at_iso}")
+                logger.info(f"[REMINDER] Created {reminder_type} reminder for {to_email} (invoice {invoice_number}), send_at={send_at_iso}")
+            except sqlite3.IntegrityError:
+                # Already exists, skip
+                logger.debug(f"[REMINDER] Reminder {reminder_id} already exists, skipping")
+                continue
 
     conn.commit()
     conn.close()
@@ -616,14 +705,14 @@ def create_or_refresh_reminders_from_rows(settings: Dict[str, Any], rows: List[D
 # -------------------------
 def build_email(stage: int, to_name: str, amount: float, due_date: Optional[date], invoice_number: str, settings: Dict[str, Any]) -> Tuple[str, str]:
     """
-    Builds email subject and HTML body using templates.
+    Builds email subject and HTML body using templates (legacy function for backward compatibility).
     stage: 0 = due date, 1 = chase #1, 2 = chase #2
     """
     company = settings["company_name"]
     signature = settings["signature_name"]
     name = to_name.strip() if to_name and to_name.strip() else ""
     amount_str = f"{amount:.2f}€" if amount else "0€"
-    language = settings.get("email_language", "en")
+    language = settings.get("email_language", "es")  # Default to Spanish
     
     # Format due date
     if due_date:
@@ -654,6 +743,75 @@ def build_email(stage: int, to_name: str, amount: float, due_date: Optional[date
     return subject, body
 
 
+def build_email_new(
+    reminder_type: str,
+    client_name: str,
+    amount: float,
+    currency: str,
+    due_date: Optional[date],
+    days_overdue: int,
+    invoice_number: str,
+    company_name: str,
+    signature: Optional[str] = None,
+) -> Tuple[str, str]:
+    """
+    Builds email subject and HTML body using new schema (Spanish only for MVP).
+    reminder_type: 'due_date' | 'chase_1' | 'chase_2'
+    """
+    # Format amount with currency
+    if currency == "EUR" or currency == "€":
+        amount_str = f"{amount:.2f}€"
+    else:
+        amount_str = f"{amount:.2f} {currency}"
+    
+    # Format due date (Spanish format)
+    if due_date:
+        due_date_str = due_date.strftime("%d/%m/%Y")
+    else:
+        due_date_str = "N/A"
+    
+    # Format greeting
+    greeting = client_name if client_name and client_name.strip() else "Hola"
+    
+    # Build signature
+    signature_line = ""
+    if signature and signature.strip():
+        signature_line = f"<br/>{signature}"
+    
+    # Build email based on reminder type
+    if reminder_type == "due_date":
+        subject = f"Recordatorio: factura {invoice_number} vence hoy"
+        body = f"""<p>Hola {greeting},</p>
+<p>Te recordamos que hoy vence la factura {invoice_number} por {amount_str}.</p>
+<p>Si ya has realizado el pago, puedes ignorar este mensaje.</p>
+<p>Gracias,<br/>{company_name}{signature_line}</p>"""
+    
+    elif reminder_type == "chase_1":
+        subject = f"Factura pendiente: {invoice_number} ({days_overdue} días de retraso)"
+        body = f"""<p>Hola {greeting},</p>
+<p>Según nuestros registros, la factura {invoice_number} por {amount_str} sigue pendiente.</p>
+<p>Han pasado {days_overdue} días desde la fecha de vencimiento ({due_date_str}).</p>
+<p>¿Podrías confirmarnos cuándo se realizará el pago?</p>
+<p>Gracias,<br/>{company_name}{signature_line}</p>"""
+    
+    elif reminder_type == "chase_2":
+        subject = f"Segundo recordatorio: factura {invoice_number} pendiente"
+        body = f"""<p>Hola {greeting},</p>
+<p>Este es un segundo recordatorio sobre la factura {invoice_number} por {amount_str}, que venció el {due_date_str}.</p>
+<p>Han pasado {days_overdue} días desde la fecha de vencimiento.</p>
+<p>Si ya has realizado el pago, puedes ignorar este mensaje. Si no, te agradeceríamos que nos confirmes cuándo se realizará el pago.</p>
+<p>Gracias,<br/>{company_name}{signature_line}</p>"""
+    
+    else:
+        # Fallback
+        subject = f"Recordatorio: factura {invoice_number}"
+        body = f"""<p>Hola {greeting},</p>
+<p>Te recordamos que la factura {invoice_number} por {amount_str} sigue pendiente.</p>
+<p>Gracias,<br/>{company_name}{signature_line}</p>"""
+    
+    return subject, body
+
+
 def send_email_via_resend(to_email: str, subject: str, html_body: str, reply_to: Optional[str] = None) -> None:
     """Send email via Resend API."""
     from email_service import send_email as resend_send
@@ -667,123 +825,123 @@ def send_email_via_resend(to_email: str, subject: str, html_body: str, reply_to:
 # -------------------------
 # Worker: envía cuando toca
 # -------------------------
-def process_due_reminders_once():
-    """Process reminders once (for immediate sending)."""
-    try:
-        settings = get_settings()
-        reply_to = (settings.get("reply_to_email") or "").strip()
-
-        conn = get_conn()
-        cur = conn.cursor()
-        
-        # Get current time in UTC for comparison (send_at is stored in ISO format)
-        now_utc = datetime.utcnow()
-        now_iso = now_utc.isoformat()
-
-        cur.execute("""
-            SELECT r.id AS rid, r.stage, r.send_at, d.email, d.name, d.amount, d.due_date
-            FROM reminders r
-            JOIN debts d ON d.id = r.debt_id
-            WHERE r.status = 'pending' AND r.send_at <= ?
-            ORDER BY r.send_at ASC
-            LIMIT 10
-        """, (now_iso,))
-        due = cur.fetchall()
-        
-        sent_count = 0
-        for row in due:
-            rid = row["rid"]
-            stage = int(row["stage"])
-            to_email = row["email"]
-            to_name = row["name"] or ""
-            amount = float(row["amount"])
-            due_date_str = row.get("due_date")
-            due_date = None
-            if due_date_str:
-                try:
-                    due_date = datetime.fromisoformat(due_date_str).date()
-                except:
-                    try:
-                        due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
-                    except:
-                        pass
-            
-            # Generate invoice number
-            invoice_seed = f"{to_email}{amount}{due_date_str or ''}"
-            invoice_hash = hashlib.md5(invoice_seed.encode()).hexdigest()[:8].upper()
-            invoice_number = f"INV-{invoice_hash}"
-
-            subject, html_body = build_email(stage, to_name, amount, due_date, invoice_number, settings)
-
-            try:
-                send_email_via_resend(to_email, subject, html_body, reply_to if reply_to else None)
-
-                sent_at = datetime.utcnow().isoformat()
-                cur.execute("""
-                    UPDATE reminders
-                    SET status = 'sent', sent_at = ?, last_error = NULL
-                    WHERE id = ?
-                """, (sent_at, rid))
-
-                cur.execute("""
-                    INSERT INTO send_log (to_email, subject, stage, sent_at, status, error)
-                    VALUES (?, ?, ?, ?, 'sent', NULL)
-                """, (to_email, subject, stage, sent_at))
-                
-                sent_count += 1
-                logger.info(f"[IMMEDIATE] Sent email to {to_email} (stage {stage})")
-
-            except Exception as e:
-                sent_at = datetime.utcnow().isoformat()
-                error_msg = str(e)
-                cur.execute("""
-                    UPDATE reminders
-                    SET status = 'failed', sent_at = ?, last_error = ?
-                    WHERE id = ?
-                """, (sent_at, error_msg, rid))
-
-                cur.execute("""
-                    INSERT INTO send_log (to_email, subject, stage, sent_at, status, error)
-                    VALUES (?, ?, ?, ?, 'failed', ?)
-                """, (to_email, subject, stage, sent_at, error_msg))
-                logger.error(f"[IMMEDIATE] Failed to send email to {to_email}: {error_msg}")
-
-        conn.commit()
-        conn.close()
-        
-        if sent_count > 0:
-            logger.info(f"[IMMEDIATE] Sent {sent_count} emails immediately")
-    except Exception as e:
-        logger.error(f"[IMMEDIATE] Error processing reminders: {e}")
-
-
-def process_due_reminders_loop():
+async def scheduler_loop():
+    """Async scheduler that runs every 30 seconds, enforces cooldown (6 hours per invoice_key)."""
+    import asyncio
+    
     while True:
         try:
+            await asyncio.sleep(30)  # Wait 30 seconds between checks
+            
             settings = get_settings()
-            reply_to = (settings.get("reply_to_email") or "").strip()
-
+            
+            # Get current time (timezone-aware)
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo("Europe/Madrid")
+                use_zoneinfo = True
+            except ImportError:
+                try:
+                    import pytz
+                    tz = pytz.timezone("Europe/Madrid")
+                    use_zoneinfo = False
+                except ImportError:
+                    tz = None
+                    use_zoneinfo = False
+            
+            if tz:
+                if use_zoneinfo:
+                    now = datetime.now(tz)
+                else:
+                    now = datetime.now(tz)
+            else:
+                now = datetime.utcnow()
+            
+            now_iso = now.isoformat()
+            
             conn = get_conn()
             cur = conn.cursor()
-            now_iso = datetime.utcnow().isoformat()
-
-            cur.execute("""
-                SELECT r.id AS rid, r.stage, r.send_at, d.email, d.name, d.amount, d.due_date
-                FROM reminders r
-                JOIN debts d ON d.id = r.debt_id
-                WHERE r.status = 'pending' AND r.send_at <= ?
-                ORDER BY r.send_at ASC
-                LIMIT 20
-            """, (now_iso,))
-            due = cur.fetchall()
-
+            
+            # Fetch pending reminders that are due (try new schema first, fallback to old)
+            try:
+                cur.execute("""
+                    SELECT id, reminder_type, to_email, client_name, amount, currency,
+                           due_date, days_overdue, invoice_number, invoice_key, last_sent_at,
+                           company_name, signature, reply_to, stage
+                    FROM reminders
+                    WHERE status = 'pending' AND send_at <= ?
+                    ORDER BY send_at ASC
+                    LIMIT 20
+                """, (now_iso,))
+                due = cur.fetchall()
+            except Exception as e:
+                # Fallback to old schema if new columns don't exist
+                logger.warning(f"[SCHEDULER] New schema query failed, trying old schema: {e}")
+                try:
+                    cur.execute("""
+                        SELECT r.id AS id, r.stage AS stage, r.send_at AS send_at,
+                               d.email AS to_email, d.name AS client_name, d.amount AS amount,
+                               d.due_date AS due_date
+                        FROM reminders r
+                        JOIN debts d ON d.id = r.debt_id
+                        WHERE r.status = 'pending' AND r.send_at <= ?
+                        ORDER BY r.send_at ASC
+                        LIMIT 20
+                    """, (now_iso,))
+                    due_old = cur.fetchall()
+                    # Convert old schema to new format (skip for now, just log)
+                    logger.warning(f"[SCHEDULER] Found {len(due_old)} reminders in old schema format - migration needed")
+                    due = []
+                except Exception as e2:
+                    logger.error(f"[SCHEDULER] Both schema queries failed: {e2}")
+                    due = []
+            
+            sent_count = 0
+            skipped_cooldown = 0
+            
             for row in due:
-                rid = row["rid"]
-                stage = int(row["stage"])
-                to_email = row["email"]
-                to_name = row["name"] or ""
-                amount = float(row["amount"])
+                reminder_id = row["id"]
+                invoice_key = row.get("invoice_key")
+                if not invoice_key:
+                    # Generate invoice_key from available data (backward compatibility)
+                    to_email = row.get("to_email") or ""
+                    invoice_number = row.get("invoice_number") or ""
+                    due_date_str = row.get("due_date") or ""
+                    invoice_key = f"{to_email}|{invoice_number}|{due_date_str}"
+                last_sent_at_str = row.get("last_sent_at")
+                
+                # Enforce cooldown: 6 hours per invoice_key
+                if last_sent_at_str:
+                    try:
+                        last_sent_at = datetime.fromisoformat(last_sent_at_str.replace("Z", "+00:00"))
+                        if tz:
+                            if use_zoneinfo:
+                                last_sent_at = last_sent_at.astimezone(tz)
+                            else:
+                                last_sent_at = last_sent_at.astimezone(tz)
+                        time_since_last = now - last_sent_at
+                        if time_since_last.total_seconds() < 6 * 3600:  # 6 hours
+                            skipped_cooldown += 1
+                            logger.debug(f"[SCHEDULER] Skipping {reminder_id} due to cooldown (last sent {time_since_last.total_seconds()/3600:.1f}h ago)")
+                            continue
+                    except Exception as e:
+                        logger.warning(f"[SCHEDULER] Error parsing last_sent_at: {e}")
+                
+                # Get reminder data
+                to_email = row["to_email"]
+                client_name = row.get("client_name") or ""
+                amount_str = row["amount"]
+                currency = row.get("currency") or "EUR"
                 due_date_str = row.get("due_date")
+                days_overdue = row.get("days_overdue") or 0
+                invoice_number = row["invoice_number"]
+                reminder_type = row["reminder_type"]
+                stage = row.get("stage") or 0
+                company_name = row.get("company_name") or settings.get("company_name", "Your Company")
+                signature = row.get("signature") or settings.get("signature_name", "")
+                reply_to = row.get("reply_to") or settings.get("reply_to_email") or ""
+                
+                # Parse due date
                 due_date = None
                 if due_date_str:
                     try:
@@ -794,60 +952,93 @@ def process_due_reminders_loop():
                         except:
                             pass
                 
-                # Generate invoice number (simple hash of email + amount + due_date)
-                invoice_seed = f"{to_email}{amount}{due_date_str or ''}"
-                invoice_hash = hashlib.md5(invoice_seed.encode()).hexdigest()[:8].upper()
-                invoice_number = f"INV-{invoice_hash}"
-
-                subject, html_body = build_email(stage, to_name, amount, due_date, invoice_number, settings)
-
+                # Parse amount
                 try:
+                    amount = float(amount_str)
+                except:
+                    amount = 0.0
+                
+                # Build email using new template system
+                subject, html_body = build_email_new(
+                    reminder_type=reminder_type,
+                    client_name=client_name,
+                    amount=amount,
+                    currency=currency,
+                    due_date=due_date,
+                    days_overdue=days_overdue,
+                    invoice_number=invoice_number,
+                    company_name=company_name,
+                    signature=signature,
+                )
+                
+                try:
+                    # Send email
                     send_email_via_resend(to_email, subject, html_body, reply_to if reply_to else None)
-
-                    sent_at = datetime.utcnow().isoformat()
+                    
+                    sent_at = now.isoformat()
+                    
+                    # Update reminder status
                     cur.execute("""
                         UPDATE reminders
-                        SET status = 'sent', sent_at = ?, last_error = NULL
+                        SET status = 'sent', sent_at = ?, error = NULL, last_sent_at = ?
                         WHERE id = ?
-                    """, (sent_at, rid))
-
+                    """, (sent_at, sent_at, reminder_id))
+                    
+                    # Update all reminders for this invoice_key with last_sent_at (for cooldown)
+                    cur.execute("""
+                        UPDATE reminders
+                        SET last_sent_at = ?
+                        WHERE invoice_key = ?
+                    """, (sent_at, invoice_key))
+                    
+                    # Log to send_log
                     cur.execute("""
                         INSERT INTO send_log (to_email, subject, stage, sent_at, status, error)
                         VALUES (?, ?, ?, ?, 'sent', NULL)
                     """, (to_email, subject, stage, sent_at))
-
+                    
+                    sent_count += 1
+                    logger.info(f"[SCHEDULER] Sent {reminder_type} email to {to_email} (invoice {invoice_number})")
+                    
                 except Exception as e:
-                    sent_at = datetime.utcnow().isoformat()
+                    sent_at = now.isoformat()
                     error_msg = str(e)
+                    
                     cur.execute("""
                         UPDATE reminders
-                        SET status = 'failed', sent_at = ?, last_error = ?
+                        SET status = 'failed', sent_at = ?, error = ?
                         WHERE id = ?
-                    """, (sent_at, error_msg, rid))
-
+                    """, (sent_at, error_msg, reminder_id))
+                    
                     cur.execute("""
                         INSERT INTO send_log (to_email, subject, stage, sent_at, status, error)
                         VALUES (?, ?, ?, ?, 'failed', ?)
                     """, (to_email, subject, stage, sent_at, error_msg))
-
+                    
+                    logger.error(f"[SCHEDULER] Failed to send email to {to_email}: {error_msg}")
+            
             conn.commit()
             conn.close()
-
+            
+            if sent_count > 0 or skipped_cooldown > 0:
+                logger.info(f"[SCHEDULER] Processed: {sent_count} sent, {skipped_cooldown} skipped (cooldown)")
+                
         except Exception as e:
-            logger.error(f"[WORKER] Error: {e}")
-
-        time.sleep(30)
+            logger.error(f"[SCHEDULER] Error in scheduler loop: {e}")
+            await asyncio.sleep(30)  # Wait before retrying
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     port = os.getenv("PORT", "10000")
     logger.info(f"Starting Invoice Chaser. PORT={port}")
     ensure_tables()
     logger.info("Database tables ensured")
-    t = threading.Thread(target=process_due_reminders_loop, daemon=True)
-    t.start()
-    logger.info("Background worker thread started")
+    
+    # Start async scheduler
+    import asyncio
+    asyncio.create_task(scheduler_loop())
+    logger.info("Async scheduler started (runs every 30 seconds)")
     
     # Temporary email test - only runs if TEST_EMAIL and RESEND_API_KEY are set
     # This will be removed after confirmation
@@ -1093,17 +1284,17 @@ def sequence_save(
     signature_name: str = Form(...),
     reply_to_email: str = Form(...),
     # Accept both old (day_1/day_2) and new (chase_1_days/chase_2_days) field names with defaults
-    chase_1_days: str = Form("2"),
-    day_1: str = Form(""),  # Legacy support
-    chase_2_days: str = Form(""),
-    day_2: str = Form(""),  # Legacy support
+    chase_1_days: Optional[str] = Form(None),  # Default to 2 in code
+    day_1: Optional[str] = Form(None),  # Legacy support
+    chase_2_days: Optional[str] = Form(None),  # Default to 0/None in code
+    day_2: Optional[str] = Form(None),  # Legacy support
     email_language: str = Form("es"),
     include_due_date_email: str = Form("true"),  # Default to true
 ):
-    # Parse chase_1_days (support both field names)
-    c1_str = chase_1_days.strip() if chase_1_days else ""
+    # Parse chase_1_days (support both field names, default to 2)
+    c1_str = (chase_1_days or "").strip() if chase_1_days else ""
     if not c1_str and day_1:
-        c1_str = day_1.strip()
+        c1_str = (day_1 or "").strip()
     if not c1_str:
         c1_str = "2"  # Default
     
@@ -1114,19 +1305,19 @@ def sequence_save(
     except Exception:
         c1 = 2  # Default on error
     
-    # Parse chase_2_days (support both field names)
-    c2_str = chase_2_days.strip() if chase_2_days else ""
+    # Parse chase_2_days (support both field names, default to 0/None)
+    c2_str = (chase_2_days or "").strip() if chase_2_days else ""
     if not c2_str and day_2:
-        c2_str = day_2.strip()
+        c2_str = (day_2 or "").strip()
     
     c2 = None
     try:
-        if c2_str and c2_str != "":
+        if c2_str and c2_str != "" and c2_str != "0":
             c2_val = int(c2_str)
             if c2_val > 0:
                 c2 = c2_val
     except Exception:
-        c2 = None
+        c2 = None  # Default: disabled (0 or empty)
 
     # Parse include_due_date_email
     include_due = str(include_due_date_email).lower() in ("true", "1", "yes", "on")
@@ -1164,15 +1355,7 @@ def sequence_save(
         if count > 0:
             created = count
     
-    # Trigger immediate processing of overdue reminders (send now if ready)
-    # This ensures emails are sent immediately for testing
-    try:
-        import threading
-        t = threading.Thread(target=process_due_reminders_once, daemon=True)
-        t.start()
-        logger.info("[AUTOMATION] Triggered immediate reminder processing")
-    except Exception as e:
-        logger.warning(f"[AUTOMATION] Could not trigger background processing: {e}")
+    # Scheduler runs automatically every 30 seconds, no need to trigger manually
 
     return templates.TemplateResponse("activated.html", {
         "request": request,
@@ -1300,23 +1483,38 @@ def activity(request: Request, token: Optional[str] = None):
     conn = get_conn()
     cur = conn.cursor()
     
-    # Obtener recordatorios desde reminders (no send_log)
-    cur.execute("""
-        SELECT r.id, r.stage, r.send_at, r.sent_at, r.status, r.last_error,
-               d.email, d.name, d.amount
-        FROM reminders r
-        JOIN debts d ON d.id = r.debt_id
-        ORDER BY r.send_at DESC, r.id DESC
-        LIMIT 50
-    """)
-    rows_raw = cur.fetchall()
+    # Obtener recordatorios desde reminders (new schema with all fields)
+    # Try new schema first, fallback to old schema for backward compatibility
+    try:
+        cur.execute("""
+            SELECT id, reminder_type, stage, send_at, sent_at, status, error,
+                   to_email, client_name, amount, invoice_number, days_overdue
+            FROM reminders
+            ORDER BY send_at DESC, id DESC
+            LIMIT 50
+        """)
+        rows_raw = cur.fetchall()
+        use_new_schema = True
+    except Exception:
+        # Fallback to old schema
+        cur.execute("""
+            SELECT r.id, r.stage, r.send_at, r.sent_at, r.status, r.last_error,
+                   d.email, d.name, d.amount
+            FROM reminders r
+            JOIN debts d ON d.id = r.debt_id
+            ORDER BY r.send_at DESC, r.id DESC
+            LIMIT 50
+        """)
+        rows_raw = cur.fetchall()
+        use_new_schema = False
+    
     conn.close()
 
     now = datetime.utcnow()
     rows = []
     for r in rows_raw:
         send_at_str = r["send_at"]
-        sent_at_str = r["sent_at"]
+        sent_at_str = r.get("sent_at") or r.get("sent_at")
         
         try:
             send_at = datetime.fromisoformat(send_at_str.replace("Z", "+00:00"))
@@ -1343,17 +1541,42 @@ def activity(request: Request, token: Optional[str] = None):
             status_display = "Cancelado"
         else:  # pending
             status_display = "Pendiente"
+        
+        # Get reminder type display name
+        if use_new_schema:
+            reminder_type = r.get("reminder_type") or "unknown"
+            if reminder_type == "due_date":
+                reminder_display = "Vencimiento"
+            elif reminder_type == "chase_1":
+                reminder_display = "Recordatorio 1"
+            elif reminder_type == "chase_2":
+                reminder_display = "Recordatorio 2"
+            else:
+                reminder_display = f"#{r.get('stage', 0)}"
+            to_email = r.get("to_email") or ""
+            to_name = r.get("client_name") or ""
+            amount = r.get("amount") or "0"
+            stage = r.get("stage") or 0
+            error = r.get("error") if (status_db == "failed") else None
+        else:
+            reminder_display = f"#{r.get('stage', 0)}"
+            to_email = r.get("email") or ""
+            to_name = r.get("name") or ""
+            amount = r.get("amount") or "0"
+            stage = r.get("stage") or 0
+            error = r.get("last_error") if (status_db == "failed") else None
 
         rows.append({
             "send_at_formatted": send_at_formatted,
             "sent_at_formatted": sent_at_formatted,
-            "to_email": r["email"],
-            "to_name": r["name"] or "",
-            "amount": r["amount"],
-            "stage": r["stage"],
+            "to_email": to_email,
+            "to_name": to_name,
+            "amount": amount,
+            "stage": stage,
+            "reminder_display": reminder_display,
             "status": status_db,
             "status_display": status_display,
-            "error": r["last_error"] if (status_db == "failed" and r["last_error"]) else None,
+            "error": error,
         })
 
     st = get_state()
@@ -1369,5 +1592,44 @@ def activity(request: Request, token: Optional[str] = None):
 @app.get("/logs", response_class=HTMLResponse)
 def logs():
     return RedirectResponse(url="/activity")
+
+
+@app.get("/debug/pending")
+def debug_pending():
+    """Debug endpoint to view pending reminders."""
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT id, reminder_type, to_email, invoice_number, send_at, status,
+               created_at, sent_at, error, invoice_key, last_sent_at
+        FROM reminders
+        WHERE status = 'pending'
+        ORDER BY send_at ASC
+        LIMIT 20
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    
+    result = []
+    for row in rows:
+        result.append({
+            "id": row["id"],
+            "reminder_type": row["reminder_type"],
+            "to_email": row["to_email"],
+            "invoice_number": row["invoice_number"],
+            "send_at": row["send_at"],
+            "status": row["status"],
+            "created_at": row.get("created_at"),
+            "sent_at": row.get("sent_at"),
+            "error": row.get("error"),
+            "invoice_key": row.get("invoice_key"),
+            "last_sent_at": row.get("last_sent_at"),
+        })
+    
+    return JSONResponse({
+        "count": len(result),
+        "reminders": result,
+    })
 
 

@@ -120,7 +120,7 @@
                     <div style="font-size:11px;color:var(--muted);">{{ r.to_name }}</div>
                   {% endif %}
                 </td>
-                <td>#{{ r.stage }}</td>
+                <td>{{ r.reminder_display }}</td>
                 <td>{{ r.send_at_formatted }}</td>
                 <td>
                   {% if r.sent_at_formatted %}
